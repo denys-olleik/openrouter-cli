@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 
 const string PromptFile = "prompt.md";
+const string PdfArchiveDirectory = "pdf-archived";
 
 string? apiKey = Environment.GetEnvironmentVariable("openrouter");
 
@@ -13,17 +14,17 @@ if (string.IsNullOrWhiteSpace(apiKey))
 }
 
 // Usage:
-//   openrouter <model> -r=<reasoning-effort> -v=<verbosity>
+//   openrouter <model> -r=<reasoning-effort> -v=<verbosity> [pdf]
 //
 // Example:
-//   openrouter openai/5.6-sol -r=none -v=low
+//   openrouter openai/5.6-sol -r=none -v=low pdf
 
-if (args.Length != 3)
+if (args.Length is < 3 or > 4)
 {
   Console.Error.WriteLine(
-      "Usage: openrouter <model> -r=<reasoning-effort> -v=<verbosity>");
+      "Usage: openrouter <model> -r=<reasoning-effort> -v=<verbosity> [pdf]");
   Console.Error.WriteLine(
-      "Example: openrouter openai/5.6-sol -r=none -v=low");
+      "Example: openrouter openai/5.6-sol -r=none -v=low pdf");
   return 1;
 }
 
@@ -43,6 +44,14 @@ if (!args[2].StartsWith("-v=", StringComparison.OrdinalIgnoreCase))
 
 string reasoningEffort = args[1][3..].ToLowerInvariant();
 string verbosity = args[2][3..].ToLowerInvariant();
+bool sendPdfs = args.Length == 4 &&
+    args[3].Equals("pdf", StringComparison.OrdinalIgnoreCase);
+
+if (args.Length == 4 && !sendPdfs)
+{
+  Console.Error.WriteLine("Expected optional command 'pdf'.");
+  return 1;
+}
 
 // Model-specific validation.
 // Add additional model-specific rules here as needed.
@@ -101,6 +110,12 @@ if (!File.Exists(PromptFile))
 }
 
 string prompt = await File.ReadAllTextAsync(PromptFile);
+string[] pdfFiles = sendPdfs
+    ? Directory.GetFiles(
+        Directory.GetCurrentDirectory(),
+        "*.pdf",
+        SearchOption.TopDirectoryOnly)
+    : [];
 
 if (string.IsNullOrWhiteSpace(prompt))
 {
@@ -116,6 +131,29 @@ using var http = new HttpClient
 http.DefaultRequestHeaders.Authorization =
     new AuthenticationHeaderValue("Bearer", apiKey);
 
+var messageContent = new List<object>
+{
+  new
+  {
+    type = "text",
+    text = prompt
+  }
+};
+
+foreach (string pdfFile in pdfFiles)
+{
+  byte[] pdfBytes = await File.ReadAllBytesAsync(pdfFile);
+  messageContent.Add(new
+  {
+    type = "file",
+    file = new
+    {
+      filename = Path.GetFileName(pdfFile),
+      file_data = $"data:application/pdf;base64,{Convert.ToBase64String(pdfBytes)}"
+    }
+  });
+}
+
 var request = new
 {
   model = model,
@@ -124,7 +162,7 @@ var request = new
     new
     {
       role = "user",
-      content = prompt
+      content = messageContent
     }
   },
 
@@ -219,6 +257,19 @@ string addition =
     $"{metadata}{Environment.NewLine}";
 
 await File.AppendAllTextAsync(PromptFile, addition);
+
+if (pdfFiles.Length > 0)
+{
+  Directory.CreateDirectory(PdfArchiveDirectory);
+
+  foreach (string pdfFile in pdfFiles)
+  {
+    string destination = Path.Combine(
+        PdfArchiveDirectory,
+        Path.GetFileName(pdfFile));
+    File.Move(pdfFile, destination, overwrite: true);
+  }
+}
 
 Console.WriteLine(answer);
 
